@@ -1,4 +1,4 @@
-# telegram-translation-bot
+# telegram-translation-bot(openAI版)
 telegram bot, 默认情况下，所有消息都会被翻译成中文。
 
 👤 个人设置:
@@ -25,8 +25,9 @@ pnpm install
 ```
 
 # 运行
-.env 文件 添加机器人token 
+.env 文件 添加机器人token, openai api key
 TELEGRAM_BOT_TOKEN=xxx
+OPENAI_API_KEY=xxx
 
 ```bash 
   pnpm build && pnpm start

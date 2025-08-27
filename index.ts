@@ -1,8 +1,8 @@
 import fs from "fs";
 import path from "path";
 import dotenv from "dotenv";
+import axios from "axios";
 import { Telegraf, Context, MiddlewareFn } from "telegraf";
-import { translate as googleTranslate } from "@vitalets/google-translate-api";
 import type { Message } from "telegraf/typings/core/types/typegram";
 
 dotenv.config();
@@ -10,169 +10,157 @@ dotenv.config();
 // ---------- Types ----------
 
 interface UserPrefs {
-  [userId: string]: {
-    targetLang: string;
-    updatedAt: string;
-  };
+  [userId: string]: { targetLang: string; updatedAt: string };
 }
-
-// 为群组设置添加类型定义
 interface GroupPrefs {
-  [chatId: string]: {
-    targetLang: string;
-    updatedAt: string;
-  };
+  [chatId: string]: { targetLang: string; updatedAt: string };
 }
 
 // ---------- Config ----------
 
 const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-if (!TOKEN) {
-  throw new Error("Missing TELEGRAM_BOT_TOKEN in environment");
+if (!TOKEN) throw new Error("Missing TELEGRAM_BOT_TOKEN in environment");
+
+// OpenAI API Configuration +++
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_API_URL = process.env.OPENAI_API_URL || "https://api.openai.com/v1/chat/completions";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o";
+
+if (!OPENAI_API_KEY) {
+    throw new Error("Missing OPENAI_API_KEY in environment");
 }
 
-const DEFAULT_TARGET_LANG = "zh"; // 全局最终回退的默认语言
-const USER_PREFS_FILE = path.resolve(process.cwd(), "user-prefs.json");
-const GROUP_PREFS_FILE = path.resolve(process.cwd(), "group-prefs.json"); // +++ NEW
 
-const ALLOWED_LANGS = new Set([
-  "zh",
-  "en",
-  "ja",
-  "ko",
-  "es",
-  "fr",
-  "de",
-  "ru",
-  "pt",
-  "it",
-  "ar",
-  "hi",
-  "th",
-  "vi",
-  "id",
-  "tr",
-  "nl",
-  "pl",
-  "sv",
-  "uk",
-  "he",
+const DEFAULT_TARGET_LANG = "zh";
+const USER_PREFS_FILE = path.resolve(process.cwd(), "user-prefs.json");
+const GROUP_PREFS_FILE = path.resolve(process.cwd(), "group-prefs.json");
+
+const ALLOWED_LANGS = new Map([
+    ["zh", "中文"], ["en", "English"], ["ja", "日本語"], ["ko", "한국어"],
+    ["es", "Español"], ["fr", "Français"], ["de", "Deutsch"], ["ru", "Русский"],
+    ["pt", "Português"], ["it", "Italiano"], ["ar", "العربية"], ["hi", "हिन्दी"],
+    ["th", "ไทย"], ["vi", "Tiếng Việt"],
 ]);
 
 function isValidLang(code: string): boolean {
-  const lc = code.trim().toLowerCase();
-  return ALLOWED_LANGS.has(lc);
+  return ALLOWED_LANGS.has(code.trim().toLowerCase());
+}
+
+function getLanguageDisplayName(code: string): string {
+    return ALLOWED_LANGS.get(code.toLowerCase()) || code;
 }
 
 // ---------- Storage Classes ----------
-
-// 存储基类，用于复用 load/save 逻辑
 class PrefsStore<T> {
   protected file: string;
   protected cache: T;
-
-  constructor(file: string, defaultValue: T) {
-    this.file = file;
-    this.cache = this.load(defaultValue);
-  }
-
-  private load(defaultValue: T): T {
-    try {
-      if (fs.existsSync(this.file)) {
-        const raw = fs.readFileSync(this.file, "utf8");
-        return JSON.parse(raw) as T;
-      }
-    } catch (e) {
-      console.error(`Failed to load prefs file: ${this.file}`, e);
-    }
-    return defaultValue;
-  }
-
-  protected save() {
-    try {
-      fs.writeFileSync(this.file, JSON.stringify(this.cache, null, 2), "utf8");
-    } catch (e) {
-      console.error(`Failed to save prefs file: ${this.file}`, e);
-    }
-  }
+  constructor(file: string, defaultValue: T) { this.file = file; this.cache = this.load(defaultValue); }
+  private load(defaultValue: T): T { try { if (fs.existsSync(this.file)) { const raw = fs.readFileSync(this.file, "utf8"); return JSON.parse(raw) as T; } } catch (e) { console.error(`Failed to load prefs file: ${this.file}`, e); } return defaultValue; }
+  protected save() { try { fs.writeFileSync(this.file, JSON.stringify(this.cache, null, 2), "utf8"); } catch (e) { console.error(`Failed to save prefs file: ${this.file}`, e); } }
 }
-
 class UserPrefsStore extends PrefsStore<UserPrefs> {
-  constructor(file: string) {
-    super(file, {});
-  }
-  getTargetLang(userId: number): string | undefined {
-    return this.cache[String(userId)]?.targetLang;
-  }
-  setTargetLang(userId: number, lang: string) {
-    this.cache[String(userId)] = {
-      targetLang: lang,
-      updatedAt: new Date().toISOString(),
-    };
-    this.save();
-  }
+  constructor(file: string) { super(file, {}); }
+  getTargetLang(userId: number): string | undefined { return this.cache[String(userId)]?.targetLang; }
+  setTargetLang(userId: number, lang: string) { this.cache[String(userId)] = { targetLang: lang, updatedAt: new Date().toISOString() }; this.save(); }
 }
-
-// 群组设置的存储类
 class GroupPrefsStore extends PrefsStore<GroupPrefs> {
-  constructor(file: string) {
-    super(file, {});
-  }
-  getTargetLang(chatId: number): string | undefined {
-    return this.cache[String(chatId)]?.targetLang;
-  }
-  setTargetLang(chatId: number, lang: string) {
-    this.cache[String(chatId)] = {
-      targetLang: lang,
-      updatedAt: new Date().toISOString(),
-    };
-    this.save();
-  }
+  constructor(file: string) { super(file, {}); }
+  getTargetLang(chatId: number): string | undefined { return this.cache[String(chatId)]?.targetLang; }
+  setTargetLang(chatId: number, lang: string) { this.cache[String(chatId)] = { targetLang: lang, updatedAt: new Date().toISOString() }; this.save(); }
 }
 
 const userStore = new UserPrefsStore(USER_PREFS_FILE);
-const groupStore = new GroupPrefsStore(GROUP_PREFS_FILE); // +++ NEW
+const groupStore = new GroupPrefsStore(GROUP_PREFS_FILE);
 
-// ---------- Translation & Utilities ----------
+// ---------- API Interaction Logic for OpenAI ----------
 
-async function translate(text: string, targetLang: string): Promise<string> {
+/**
+ * 调用 OpenAI API
+ */
+async function callOpenAIAPI(messages: any[]): Promise<string> {
   try {
-    const { text: translatedText } = await googleTranslate(text, {
-      to: targetLang,
-    });
-    return translatedText;
-  } catch (error) {
-    console.error("Google Translate API error:", error);
-    throw new Error("Translation failed");
+    const response = await axios.post(
+      OPENAI_API_URL,
+      {
+        model: OPENAI_MODEL,
+        messages: messages,
+        temperature: 0.3,
+        max_tokens: 4000,
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        timeout: 45000, // 增加超时到45秒，以应对可能的网络延迟
+      }
+    );
+    return response.data.choices[0].message.content.trim();
+  } catch (error: any) {
+    console.error("❌ OpenAI API 调用失败:", error.response?.data || error.message);
+    throw new Error("翻译服务暂时不可用，请稍后重试");
   }
 }
 
-function isCommand(text?: string): boolean {
-  return !!text && text.startsWith("/");
+/**
+ * 使用LLM翻译文本的核心函数
+ */
+async function translateText(text: string, targetLanguage: string, sourceLanguage: string | null = null): Promise<string> {
+    const sourceInfo = sourceLanguage ? `从${getLanguageDisplayName(sourceLanguage)}` : '';
+    const targetDisplayName = getLanguageDisplayName(targetLanguage);
+    
+    const prompt = `请将以下文本${sourceInfo}翻译成自然流畅的${targetDisplayName}，要求：
+1. 翻译要自然，符合${targetDisplayName}母语者的表达习惯和口语化风格。
+2. 避免生硬的直译或翻译腔。
+3. 保持原文的语气和情感。
+4. 只返回翻译结果，不要添加任何解释或备注。
+
+文本："""
+${text}
+"""`;
+
+    const messages = [
+        { role: "system", content: "你是一个世界级的多语言翻译专家，能够提供最自然、最地道的翻译服务。" },
+        { role: "user", content: prompt }
+    ];
+
+    // 调用新的 OpenAI 函数
+    return callOpenAIAPI(messages);
 }
 
-function trimCode(s: string | undefined): string {
-  return (s || "").trim().toLowerCase();
+/**
+ * 新的 translate 函数，作为主逻辑的入口
+ */
+async function translate(text: string, targetLang: string): Promise<string> {
+  try {
+    const translatedText = await translateText(text, targetLang, null);
+    return translatedText;
+  } catch (error) {
+    console.error('翻译失败:', error);
+    throw error;
+  }
 }
 
-function getTextFromMessage(
-  msg: Message.TextMessage | Message.CaptionableMessage
-): string | undefined {
-  if ("text" in msg) return msg.text;
-  if ("caption" in msg) return msg.caption;
-  return undefined;
+// ---------- Utilities ----------
+function isCommand(text?: string): boolean { return !!text && text.startsWith("/"); }
+function trimCode(s: string | undefined): string { return (s || "").trim().toLowerCase(); }
+function getTextFromMessage(msg: Message.TextMessage | Message.CaptionableMessage): string | undefined {
+    if ("text" in msg) return msg.text;
+    if ("caption" in msg) return msg.caption;
+    return undefined;
 }
+
 
 // ---------- Bot setup ----------
 
 const bot = new Telegraf(TOKEN);
 
-// Middleware: ignore messages from other bots
 const ignoreBots: MiddlewareFn<Context> = async (ctx, next) => {
-  if (ctx.from?.is_bot) return;
-  return next();
+    if (ctx.from?.is_bot) return;
+    return next();
 };
 bot.use(ignoreBots);
+
 
 // --- MODIFIED: 更新帮助和开始信息
 bot.start(async (ctx) => {
@@ -222,12 +210,10 @@ bot.command("setlang", async (ctx) => {
 bot.command("getlang", async (ctx) => {
   const userLang = userStore.getTargetLang(ctx.from.id);
   const groupLang = groupStore.getTargetLang(ctx.chat.id);
-
-  let replyText = `你的个人目标语言: ${(userLang || "未设置").toUpperCase()}\n`;
+  
+  let replyText = `你的个人目标语言: ${ (userLang || "未设置").toUpperCase() }\n`;
   if (ctx.chat.type !== "private") {
-    replyText += `当前群组默认语言: ${(
-      groupLang || DEFAULT_TARGET_LANG
-    ).toUpperCase()}`;
+    replyText += `当前群组默认语言: ${ (groupLang || DEFAULT_TARGET_LANG).toUpperCase() }`;
   }
   await ctx.reply(replyText);
 });
@@ -255,24 +241,21 @@ bot.command("setdefaultlang", async (ctx) => {
   const lang = trimCode(parts[1]);
 
   if (!lang) {
-    await ctx.reply(
-      "用法: /setdefaultlang <语言代码>, 例如 /setdefaultlang ja"
-    );
+    await ctx.reply("用法: /setdefaultlang <语言代码>, 例如 /setdefaultlang ja");
     return;
   }
   if (!isValidLang(lang)) {
     await ctx.reply(`不支持的语言代码: ${lang}`);
     return;
   }
-
+  
   groupStore.setTargetLang(ctx.chat.id, lang);
   await ctx.reply(`本群的默认翻译语言已设置为 ${lang.toUpperCase()}。`);
 });
 
-// --- MODIFIED: 核心翻译逻辑
+// Core: 翻译逻辑
 bot.on(["message", "edited_message"], async (ctx) => {
-  const msg =
-    "message" in ctx.update ? ctx.update.message : ctx.update.edited_message;
+  const msg = "message" in ctx.update ? ctx.update.message : ctx.update.edited_message;
   if (!msg || !("text" in msg || "caption" in msg)) return;
 
   const text = getTextFromMessage(msg);
@@ -280,42 +263,38 @@ bot.on(["message", "edited_message"], async (ctx) => {
 
   const senderId = msg.from?.id;
   if (!senderId) return;
-
-  // 新的优先级逻辑
+  
   const userLang = userStore.getTargetLang(senderId);
   const groupLang = groupStore.getTargetLang(msg.chat.id);
   const targetLang = userLang || groupLang || DEFAULT_TARGET_LANG;
 
   try {
     const translated = await translate(text, targetLang);
-    // 如果翻译结果和原文一样，则不回复，避免在不需要翻译时刷屏
     if (translated.trim().toLowerCase() === text.trim().toLowerCase()) {
-      return;
+        return;
     }
 
     await ctx.reply(translated, {
-      reply_parameters: {
-        message_id: msg.message_id,
-        allow_sending_without_reply: true,
-      },
+      reply_parameters: { message_id: msg.message_id, allow_sending_without_reply: true },
       link_preview_options: { is_disabled: true },
     });
-  } catch (err) {
+  } catch (err: any) {
     console.error("Translate failed:", err);
-    // 翻译失败时不再打扰用户
+    if (err.message.includes('翻译服务暂时不可用')) {
+        await ctx.reply(`⚠️ ${err.message}`, {
+            reply_parameters: { message_id: msg.message_id, allow_sending_without_reply: true }
+        });
+    }
   }
 });
 
 // ---------- Launch ----------
 
-bot
-  .launch({
-    // 在启动时丢弃离线期间积攒的旧消息
-    dropPendingUpdates: true,
-  })
-  .then(() => {
-    console.log("🚀 Translator bot is running");
-  });
+bot.launch({
+  dropPendingUpdates: true,
+}).then(() => {
+  console.log("🚀 Translator bot (with OpenAI API) is running");
+});
 
 process.once("SIGINT", () => bot.stop("SIGINT"));
 process.once("SIGTERM", () => bot.stop("SIGTERM"));
