@@ -1,0 +1,22 @@
+{
+  "name": "telegram-translation-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "nodemon --exec tsx index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@vitalets/google-translate-api": "^9.2.1",
+    "axios": "1.11.0",
+    "dotenv": "^16.4.5",
+    "telegraf": "^4.16.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.3.0",
+    "nodemon": "3.1.10",
+    "tsx": "^4.15.7",
+    "typescript": "^5.5.4"
+  }
+}
